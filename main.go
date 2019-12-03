@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"github.com/jroimartin/gocui"
 	"log"
+	"math/rand"
 	"strconv"
+	"time"
 )
 
 var (
@@ -46,9 +48,12 @@ var winCombinations = [][]int{
 
 var currentGameX []int
 var currentGameO []int
+var freeSteps = []int{1, 2, 3, 4, 5, 6, 7, 8, 9}
 var winner = make(chan string)
 var reset = make(chan bool)
 var closed = make(chan bool)
+var botStep = make(chan bool)
+var userStep = make(chan bool)
 var counterSteps = 0
 
 func main() {
@@ -57,7 +62,6 @@ func main() {
 		log.Panicln(err)
 	}
 	defer g.Close()
-	g.Highlight = true
 	g.Mouse = true
 
 	g.SetManagerFunc(layout)
@@ -69,6 +73,7 @@ func main() {
 	go winnerView(g)
 	go resetView(g)
 	go closeWindow(g)
+	go listenBotStep(g)
 
 	go func() {
 		if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
@@ -76,11 +81,42 @@ func main() {
 		}
 	}()
 
+	go func() {
+		botStep <- true
+	}()
+
 	<-closed
 }
 
-func closeWindow(g *gocui.Gui) {
+func listenBotStep(g *gocui.Gui) {
+	randV := func() *gocui.View {
+		rand.Seed(time.Now().Unix()) // initialize global pseudo random generator
+		value := freeSteps[rand.Intn(len(freeSteps))]
+		itoa := strconv.Itoa(value)
+		v, _ := g.View(itoa)
+		return v
+	}
 
+	for {
+		select {
+		case <-botStep:
+			time.Sleep(1 * time.Second)
+			if len(freeSteps) == 0 {
+				return
+			}
+
+			g.Update(func(gui *gocui.Gui) error {
+				_ = handler(g, randV())
+				go func() {
+					userStep <- true
+				}()
+				return nil
+			})
+		}
+	}
+}
+
+func closeWindow(g *gocui.Gui) {
 	v, _ := g.SetView("close", 30, 0, 33, 2)
 	fmt.Fprintln(v, "X")
 
@@ -94,13 +130,17 @@ func winnerView(g *gocui.Gui) {
 	for {
 		who := <-winner
 		maxX, maxY := g.Size()
-		v, _ := g.SetView("winner", maxX/2-7, maxY/2, maxX/2+20, maxY/2+2)
-		fmt.Fprintln(v, "WINNER: "+who+" Try again?")
+		g.Update(func(gui *gocui.Gui) error {
+			v, _ := g.SetView("winner", maxX/2-7, maxY/2, maxX/2+20, maxY/2+2)
+			fmt.Fprintln(v, "WINNER: "+who+" Try again?")
 
-		_ = g.SetKeybinding("winner", gocui.MouseLeft, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-			resetGame(g)
+			_ = g.SetKeybinding("winner", gocui.MouseLeft, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+				resetGame(g)
+				return nil
+			})
 			return nil
 		})
+
 	}
 
 }
@@ -109,12 +149,16 @@ func resetView(g *gocui.Gui) {
 	for {
 		<-reset
 		maxX, maxY := g.Size()
-		v, _ := g.SetView("reset", maxX/2-7, maxY/2, maxX/2+20, maxY/2+2)
 
-		fmt.Fprintln(v, "Click me for resetting!")
+		g.Update(func(gui *gocui.Gui) error {
+			v, _ := g.SetView("reset", maxX/2-7, maxY/2, maxX/2+20, maxY/2+2)
 
-		_ = g.SetKeybinding("reset", gocui.MouseLeft, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-			resetGame(g)
+			fmt.Fprintln(v, "Click me for resetting!")
+
+			_ = g.SetKeybinding("reset", gocui.MouseLeft, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+				resetGame(g)
+				return nil
+			})
 			return nil
 		})
 	}
@@ -128,10 +172,11 @@ func resetGame(g *gocui.Gui) {
 	g.DeleteKeybindings("reset")
 	g.DeleteView("winner")
 	g.DeleteKeybindings("winner")
-
+	freeSteps = []int{1, 2, 3, 4, 5, 6, 7, 8, 9}
 	counterSteps = 0
 	currentGameX = nil
 	currentGameO = nil
+	go listenBotStep(g)
 	if err := keyBindings(g); err != nil {
 		log.Panicln(err)
 	}
@@ -151,35 +196,14 @@ func layout(g *gocui.Gui) error {
 }
 
 func keyBindings(g *gocui.Gui) error {
+
 	for key, _ := range views {
-		err := g.SetKeybinding(string(key), gocui.MouseLeft, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-			v.Clear()
-
-			g.DeleteKeybindings(v.Name())
-
-			v.Wrap = true
-			v.Autoscroll = true
-			s := v.Name()
-
-			step, _ := strconv.Atoi(s)
-			nextStep := string(stepper())
-
-			color := func() string {
-				if nextStep != "X" {
-					return Yellow
-				} else {
-					return Red
-				}
-			}()
-
-			_, _ = fmt.Fprintf(v, color, nextStep)
-			if counterSteps >= 9 {
-				reset <- true
-				return nil
-			}
-
-			if w, ok := tryToFindWinner(step, nextStep); ok {
-				winner <- w
+		err := g.SetKeybinding(string(key), gocui.MouseLeft, gocui.ModNone, func(gui *gocui.Gui, view *gocui.View) error {
+			select {
+			case <-userStep:
+				handler(gui, view)
+				botStep <- true
+			default:
 				return nil
 			}
 
@@ -193,9 +217,40 @@ func keyBindings(g *gocui.Gui) error {
 	return nil
 }
 
+func handler(g *gocui.Gui, v *gocui.View) error {
+	v.Clear()
+	g.DeleteKeybindings(v.Name())
+
+	s := v.Name()
+
+	step, _ := strconv.Atoi(s)
+	nextStep := string(stepper(step))
+
+	color := func() string {
+		if nextStep != "X" {
+			return Yellow
+		} else {
+			return Red
+		}
+	}()
+
+	_, _ = fmt.Fprintf(v, color, nextStep)
+	if counterSteps >= 9 {
+		reset <- true
+		return nil
+	}
+
+	if w, ok := tryToFindWinner(step, nextStep); ok {
+		winner <- w
+		return nil
+	}
+
+	return nil
+}
+
 var step = 'X'
 
-func stepper() rune {
+func stepper(currentStep int) rune {
 	if step == 'X' {
 		step = 'O'
 	} else {
@@ -203,6 +258,8 @@ func stepper() rune {
 	}
 
 	counterSteps++
+
+	removeFromFreeSteps(currentStep)
 
 	return step
 }
@@ -241,4 +298,13 @@ func contains(a []int, x int) bool {
 		}
 	}
 	return false
+}
+
+func removeFromFreeSteps(s int) {
+	for i, v := range freeSteps {
+		if v == s {
+			freeSteps = append(freeSteps[:i], freeSteps[i+1:]...)
+			break
+		}
+	}
 }
