@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-var (
+const (
 	Red     = "\033[1;31m%2s\033[0m"
 	Green   = "\033[1;32m%s\033[0m"
 	Yellow  = "\033[1;33m%s\033[0m"
@@ -17,6 +17,9 @@ var (
 	Magenta = "\033[1;35m%s\033[0m"
 	Teal    = "\033[1;36m%s\033[0m"
 	White   = "\033[1;37m%s\033[0m"
+
+	YOU = "YOU"
+	BOT = "BOT"
 )
 
 var views = map[string][]int{
@@ -71,6 +74,7 @@ func main() {
 	}
 
 	go winnerView(g)
+	go whoFirstWindow(g)
 	go resetView(g)
 	go closeWindow(g)
 	go listenBotStep(g)
@@ -79,10 +83,6 @@ func main() {
 		if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
 			log.Panicln(err)
 		}
-	}()
-
-	go func() {
-		botStep <- true
 	}()
 
 	<-closed
@@ -106,7 +106,7 @@ func listenBotStep(g *gocui.Gui) {
 			}
 
 			g.Update(func(gui *gocui.Gui) error {
-				_ = handler(g, randV())
+				_ = handler(g, randV(), BOT)
 				go func() {
 					userStep <- true
 				}()
@@ -125,14 +125,48 @@ func closeWindow(g *gocui.Gui) {
 		return nil
 	})
 }
+func whoFirstWindow(g *gocui.Gui) {
+	v, _ := g.SetView("whoFirstWindow", 40, 3, 56, 6)
+	v.Title = "Who first?"
+
+	botV, _ := g.SetView("botStep", 40, 4, 47, 6)
+	fmt.Fprintln(botV, BOT)
+	youV, _ := g.SetView("userStep", 49, 4, 56, 6)
+	fmt.Fprintln(youV, YOU)
+
+	_ = g.SetKeybinding("botStep", gocui.MouseLeft, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		g.DeleteKeybindings(botV.Name())
+		g.DeleteKeybindings(youV.Name())
+		v.Title = "1"
+		go func() {
+			botStep <- true
+		}()
+		return nil
+	})
+
+	_ = g.SetKeybinding("userStep", gocui.MouseLeft, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		g.Update(func(gui *gocui.Gui) error {
+			g.DeleteKeybindings(botV.Name())
+			g.DeleteKeybindings(youV.Name())
+			v.Title = "1"
+			go func() {
+				userStep <- true
+			}()
+			return nil
+		})
+
+		return nil
+	})
+}
 
 func winnerView(g *gocui.Gui) {
 	for {
 		who := <-winner
-		maxX, maxY := g.Size()
 		g.Update(func(gui *gocui.Gui) error {
-			v, _ := g.SetView("winner", maxX/2-7, maxY/2, maxX/2+20, maxY/2+2)
-			fmt.Fprintln(v, "WINNER: "+who+" Try again?")
+			g.DeleteView("winner")
+			g.DeleteKeybindings("winner")
+			v, _ := g.SetView("winner", 60, 3, 83, 5)
+			fmt.Fprintln(v, "\033[1;32mWINNER:\033[0m \033[1;31m"+who+"\033[0m \033[1;32mTry again?\033[0m")
 
 			_ = g.SetKeybinding("winner", gocui.MouseLeft, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
 				resetGame(g)
@@ -140,9 +174,7 @@ func winnerView(g *gocui.Gui) {
 			})
 			return nil
 		})
-
 	}
-
 }
 
 func resetView(g *gocui.Gui) {
@@ -172,11 +204,18 @@ func resetGame(g *gocui.Gui) {
 	g.DeleteKeybindings("reset")
 	g.DeleteView("winner")
 	g.DeleteKeybindings("winner")
+
+	g.DeleteView("whoFirstWindow")
+	g.DeleteView("botStep")
+	g.DeleteKeybindings("botStep")
+	g.DeleteView("userStep")
+	g.DeleteKeybindings("userStep")
 	freeSteps = []int{1, 2, 3, 4, 5, 6, 7, 8, 9}
 	counterSteps = 0
 	currentGameX = nil
 	currentGameO = nil
 	go listenBotStep(g)
+	go whoFirstWindow(g)
 	if err := keyBindings(g); err != nil {
 		log.Panicln(err)
 	}
@@ -199,9 +238,10 @@ func keyBindings(g *gocui.Gui) error {
 
 	for key, _ := range views {
 		err := g.SetKeybinding(string(key), gocui.MouseLeft, gocui.ModNone, func(gui *gocui.Gui, view *gocui.View) error {
+
 			select {
 			case <-userStep:
-				handler(gui, view)
+				handler(gui, view, YOU)
 				botStep <- true
 			default:
 				return nil
@@ -217,9 +257,10 @@ func keyBindings(g *gocui.Gui) error {
 	return nil
 }
 
-func handler(g *gocui.Gui, v *gocui.View) error {
+func handler(g *gocui.Gui, v *gocui.View, who string) error {
 	v.Clear()
 	g.DeleteKeybindings(v.Name())
+	v.Title = who
 
 	s := v.Name()
 
