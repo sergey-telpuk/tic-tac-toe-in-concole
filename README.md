@@ -1,2 +1,2 @@
 # tic-tac-toe-in-console
-Small game with a bot
+A small game with a bot
